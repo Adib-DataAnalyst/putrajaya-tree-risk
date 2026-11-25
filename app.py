@@ -9,7 +9,7 @@ Run with:  streamlit run app.py
 """
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import altair as alt
 import folium
@@ -34,6 +34,13 @@ STATUS_COLORS = {"SAFE": "#1fb85a", "AT RISK": "#f2c200", "DANGER": "#e5393a"}
 STATUS_PRIORITY = {"DANGER": 0, "AT RISK": 1, "SAFE": 2}
 ACCENT = "#22b8e0"
 
+# Streamlit Cloud servers run on UTC, so always use Malaysia time (UTC+8, no daylight saving)
+MY_TZ = timezone(timedelta(hours=8))
+
+
+def now_my() -> datetime:
+    return datetime.now(MY_TZ)
+
 st.set_page_config(page_title="Putrajaya Tree Wind Risk", layout="wide", page_icon="🌳")
 
 # ===========================================================
@@ -44,7 +51,7 @@ st.markdown(
     <style>
     .stApp {{ background: #0b1220; }}
     section[data-testid="stSidebar"] {{ background: #0d1526; border-right: 1px solid #1f2d45; }}
-    .block-container {{ padding-top: 1.2rem; padding-bottom: 1rem; max-width: 100%; }}
+    .block-container {{ padding-top: 4rem; padding-bottom: 1rem; max-width: 100%; }}
     h1, h2, h3, h4 {{ color: #e8f0fb !important; font-family: "Segoe UI", sans-serif; }}
     div[data-testid="stVerticalBlockBorderWrapper"] {{
         background: #111a2b; border: 1px solid #1f2d45; border-radius: 10px;
@@ -177,7 +184,7 @@ with time_box:
     )
 selected_idx = day_labels.index(selected_label)
 valid_text = (
-    f"Live · {datetime.now().strftime('%a %d %b %H:%M')}"
+    f"Live · {now_my().strftime('%a %d %b %H:%M')} MYT"
     if selected_idx == 0
     else f"Valid {selected_label} · lead +{selected_idx} d · daily max wind"
 )
@@ -247,7 +254,18 @@ with main_box:
 
     # ---------------- LEFT: KPIs + map ----------------
     with left:
-        k1, k2, k3, k4 = st.columns(4)
+        k0, k1, k2, k3, k4 = st.columns(5)
+        if filtered_df.empty:
+            k0.metric("💨 Wind speed", "—")
+        else:
+            avg_w = filtered_df["Display Wind Speed (kmh)"].mean()
+            max_w = filtered_df["Display Wind Speed (kmh)"].max()
+            k0.metric(
+                "💨 Avg wind · Now" if selected_idx == 0 else f"💨 Avg max wind · {selected_label}",
+                f"{avg_w:.1f} km/h",
+                delta=f"peak {max_w:.1f} km/h",
+                delta_color="off",
+            )
         k1.metric("Total Trees", f"{len(filtered_df):,}")
         k2.metric("🟢 Safe", f"{int((filtered_df['Status'] == 'SAFE').sum()):,}")
         k3.metric("🟡 At Risk", f"{int((filtered_df['Status'] == 'AT RISK').sum()):,}")
@@ -281,7 +299,11 @@ with main_box:
                     attr="Esri World Imagery", overlay=False, control=False,
                 ).add_to(m)
             else:
-                folium.TileLayer("CartoDB dark_matter", overlay=False, control=False).add_to(m)
+                folium.TileLayer(
+                    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+                    attr="Esri Dark Gray Canvas", overlay=False, control=False,
+                    max_zoom=19, max_native_zoom=16,
+                ).add_to(m)
 
             wind_label = "Live wind" if selected_idx == 0 else f"Forecast max wind ({selected_label})"
             for _, row in map_render_df.iterrows():
@@ -369,15 +391,20 @@ with main_box:
                 peak = max(daily_max) if daily_max else float("nan")
                 days_danger = int(sum(1 for x in daily_max if x is not None and x >= critical))
 
+                sel_wind = float(prow["Display Wind Speed (kmh)"])
                 s1, s2, s3 = st.columns(3)
                 s1.markdown(f'<div class="stat-big">{critical:.0f}</div><div class="stat-sub">Critical km/h</div>',
                             unsafe_allow_html=True)
-                s2.markdown(f'<div class="stat-big">{peak:.0f}</div><div class="stat-sub">7-day peak km/h</div>',
-                            unsafe_allow_html=True)
-                s3.markdown(f'<div class="stat-big">{days_danger}</div><div class="stat-sub">Days ≥ critical</div>',
+                s2.markdown(
+                    f'<div class="stat-big">{sel_wind:.1f}</div>'
+                    f'<div class="stat-sub">{"Wind now km/h" if selected_idx == 0 else "Day max wind km/h"}</div>',
+                    unsafe_allow_html=True)
+                s3.markdown(f'<div class="stat-big">{peak:.0f}</div><div class="stat-sub">7-day peak km/h</div>',
                             unsafe_allow_html=True)
                 lean = prow.get("Trunk Lean Angle [°]", "N/A")
-                st.markdown(f'<div class="stat-sub">Trunk lean angle: {lean}°</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="stat-sub">Days ≥ critical: {days_danger} · Trunk lean angle: {lean}°</div>',
+                    unsafe_allow_html=True)
 
                 if w:
                     # --- Hourly (today) ---
@@ -472,7 +499,7 @@ def generate_pdf_report(df: pd.DataFrame, day_label: str, precincts_filter, stat
 
     pdf.set_font("Helvetica", "", 11)
     pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 8, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
+    pdf.cell(0, 8, f"Generated: {now_my().strftime('%Y-%m-%d %H:%M')} MYT", ln=True)
     pdf.cell(0, 8, f"Conditions shown for: {day_label}", ln=True)
     if precincts_filter:
         pdf.cell(0, 8, f"Precinct filter: {', '.join(map(str, precincts_filter))}", ln=True)
@@ -527,7 +554,7 @@ d1, d2, _ = st.columns([1, 1, 3])
 with d1:
     st.download_button(
         "📄 PDF Report", data=pdf_bytes,
-        file_name=f"Tree_Risk_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        file_name=f"Tree_Risk_Report_{now_my().strftime('%Y%m%d_%H%M')}.pdf",
         mime="application/pdf",
     )
 with d2:
