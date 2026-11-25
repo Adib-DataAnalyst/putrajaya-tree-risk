@@ -19,6 +19,8 @@ import requests
 import streamlit as st
 from fpdf import FPDF
 from pyproj import Transformer
+import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 from streamlit_folium import st_folium
 
 # ===========================================================
@@ -29,6 +31,7 @@ GRID_PRECISION = 2             # ~1.1 km grid cells
 YELLOW_THRESHOLD_RATIO = 0.8   # 80-99% of critical speed = AT RISK
 FORECAST_DAYS_AHEAD = 6        # Now + 6 days
 MAX_MARKERS_ON_MAP = 4000
+REFRESH_MINUTES = 15           # Open-Meteo updates current conditions about every 15 min
 
 STATUS_COLORS = {"SAFE": "#1fb85a", "AT RISK": "#f2c200", "DANGER": "#e5393a"}
 STATUS_PRIORITY = {"DANGER": 0, "AT RISK": 1, "SAFE": 2}
@@ -42,6 +45,7 @@ def now_my() -> datetime:
     return datetime.now(MY_TZ)
 
 st.set_page_config(page_title="Putrajaya Tree Wind Risk", layout="wide", page_icon="🌳")
+st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="auto_refresh")
 
 # ===========================================================
 # DARK PROFESSIONAL THEME
@@ -67,6 +71,13 @@ st.markdown(
     .stButton > button:hover, .stDownloadButton > button:hover {{
         border-color: {ACCENT}; color: {ACCENT};
     }}
+    div[data-testid="stVerticalBlock"] {{ gap: 0.6rem; }}
+    .kpi-grid {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }}
+    .kpi {{ background: #111a2b; border: 1px solid #1f2d45; border-radius: 8px; padding: 7px 12px; min-width: 0; }}
+    .kpi-l {{ font-size: 0.68rem; letter-spacing: 0.06em; color: #8fa3bf; text-transform: uppercase; white-space: nowrap; }}
+    .kpi-v {{ font-size: 1.45rem; font-weight: 700; color: #e8f0fb; line-height: 1.25; white-space: nowrap; }}
+    .kpi-v small {{ font-size: 0.75rem; font-weight: 500; color: #8fa3bf; }}
+    .kpi-s {{ font-size: 0.7rem; color: #8fa3bf; white-space: nowrap; }}
     .hdr-title {{ font-size: 1.25rem; font-weight: 700; color: #e8f0fb; margin: 0; }}
     .hdr-sub {{ font-family: "Consolas", monospace; font-size: 0.8rem; color: #8fa3bf; margin: 2px 0 0 0; }}
     .lbl {{ font-size: 0.7rem; letter-spacing: 0.08em; color: #8fa3bf; text-transform: uppercase; margin-bottom: 4px; }}
@@ -111,7 +122,7 @@ except FileNotFoundError:
 # STEP 2 — Live + 6-day forecast per grid zone (one API call each, cached 1h)
 #    daily index 0 = today, 1..6 = next six days
 # ===========================================================
-@st.cache_data(ttl=3600, show_spinner="Fetching live + 6-day forecast wind data...")
+@st.cache_data(ttl=REFRESH_MINUTES * 60, show_spinner="Fetching live + 6-day forecast wind data...")
 def fetch_weather_for_grids(grid_coords: list[tuple[float, float]]) -> dict:
     results = {}
     total_days = FORECAST_DAYS_AHEAD + 1
@@ -132,6 +143,7 @@ def fetch_weather_for_grids(grid_coords: list[tuple[float, float]]) -> dict:
             results[(lat, lon)] = {
                 "current": data["current_weather"]["windspeed"],
                 "direction": data["current_weather"]["winddirection"],
+                "obs_time": data["current_weather"]["time"],
                 "hourly_times": data["hourly"]["time"][:24],
                 "hourly_speeds": data["hourly"]["windspeed_10m"][:24],
                 "daily_times": data["daily"]["time"],
@@ -183,8 +195,9 @@ with time_box:
         "Lead time", options=day_labels, value=day_labels[0], label_visibility="collapsed"
     )
 selected_idx = day_labels.index(selected_label)
+obs_txt = pd.to_datetime(sample_weather["obs_time"]).strftime("%a %d %b %H:%M")
 valid_text = (
-    f"Live · {now_my().strftime('%a %d %b %H:%M')} MYT"
+    f"Live wind data as of {obs_txt} MYT · auto-refresh every {REFRESH_MINUTES} min"
     if selected_idx == 0
     else f"Valid {selected_label} · lead +{selected_idx} d · daily max wind"
 )
@@ -242,6 +255,14 @@ with header_box:
             f'<p class="hdr-sub">{valid_text}</p>',
             unsafe_allow_html=True,
         )
+        components.html(
+            '<div id="c" style="font-family:Consolas,monospace;font-size:13px;color:#22b8e0;"></div>'
+            '<script>function t(){document.getElementById("c").textContent="🕒 "+'
+            'new Date().toLocaleString("en-GB",{timeZone:"Asia/Kuala_Lumpur",weekday:"short",'
+            'day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})+" MYT";}'
+            't();setInterval(t,1000);</script>',
+            height=24,
+        )
     with h2:
         basemap = st.radio("Basemap", ["Dark", "Satellite"], horizontal=True, index=1,
                            label_visibility="collapsed")
@@ -254,22 +275,36 @@ with main_box:
 
     # ---------------- LEFT: KPIs + map ----------------
     with left:
-        k0, k1, k2, k3, k4 = st.columns(5)
-        if filtered_df.empty:
-            k0.metric("💨 Wind speed", "—")
-        else:
-            avg_w = filtered_df["Display Wind Speed (kmh)"].mean()
-            max_w = filtered_df["Display Wind Speed (kmh)"].max()
-            k0.metric(
-                "💨 Avg wind · Now" if selected_idx == 0 else f"💨 Avg max wind · {selected_label}",
-                f"{avg_w:.1f} km/h",
-                delta=f"peak {max_w:.1f} km/h",
-                delta_color="off",
+        def kpi(label, value, sub="", color="#2a3d5e"):
+            return (
+                f'<div class="kpi" style="border-left:3px solid {color}">'
+                f'<div class="kpi-l">{label}</div><div class="kpi-v">{value}</div>'
+                f'<div class="kpi-s">{sub}</div></div>'
             )
-        k1.metric("Total Trees", f"{len(filtered_df):,}")
-        k2.metric("🟢 Safe", f"{int((filtered_df['Status'] == 'SAFE').sum()):,}")
-        k3.metric("🟡 At Risk", f"{int((filtered_df['Status'] == 'AT RISK').sum()):,}")
-        k4.metric("🔴 Danger", f"{int((filtered_df['Status'] == 'DANGER').sum()):,}")
+
+        total_n = len(filtered_df)
+        n_safe = int((filtered_df["Status"] == "SAFE").sum())
+        n_risk = int((filtered_df["Status"] == "AT RISK").sum())
+        n_danger = int((filtered_df["Status"] == "DANGER").sum())
+        pct = lambda n: f"{(n / total_n * 100):.1f}% of trees" if total_n else "—"
+
+        if filtered_df.empty:
+            wind_v, wind_s = "—", "no trees in view"
+        else:
+            wind_v = f'{filtered_df["Display Wind Speed (kmh)"].mean():.1f} <small>km/h</small>'
+            wind_s = f'peak {filtered_df["Display Wind Speed (kmh)"].max():.1f} km/h'
+        wind_l = "💨 Avg wind" if selected_idx == 0 else "💨 Avg max wind"
+
+        st.markdown(
+            '<div class="kpi-grid">'
+            + kpi(wind_l, wind_v, wind_s, ACCENT)
+            + kpi("Total trees", f"{total_n:,}", "in current view")
+            + kpi("Safe", f"{n_safe:,}", pct(n_safe), STATUS_COLORS["SAFE"])
+            + kpi("At risk", f"{n_risk:,}", pct(n_risk), STATUS_COLORS["AT RISK"])
+            + kpi("Danger", f"{n_danger:,}", pct(n_danger), STATUS_COLORS["DANGER"])
+            + "</div>",
+            unsafe_allow_html=True,
+        )
 
         map_render_df = filtered_df.copy()
         if len(map_render_df) > MAX_MARKERS_ON_MAP:
@@ -279,10 +314,9 @@ with main_box:
                 .groupby("_priority", group_keys=False)
                 .apply(lambda g: g.sample(min(len(g), MAX_MARKERS_ON_MAP // 3), random_state=1))
             )
-            st.warning(
-                f"Showing {len(map_render_df):,} of {len(filtered_df):,} trees "
-                "(DANGER / AT RISK prioritised) to keep the map responsive. "
-                "Pick a Precinct in the sidebar to see every tree in an area."
+            st.caption(
+                f"Map shows {len(map_render_df):,} of {len(filtered_df):,} trees "
+                "(danger / at-risk first). Pick a Precinct in the sidebar to see every tree in an area."
             )
 
         if map_render_df.empty:
