@@ -1,7 +1,9 @@
 streamlit
 pandas
+numpy
 requests
 pyproj
 folium
 streamlit-folium
 fpdf2
+altair
